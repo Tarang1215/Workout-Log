@@ -158,13 +158,13 @@ def fill_past_diet_blanks(profile_txt):
 # ==========================================
 # 4. 메인 UI
 # ==========================================
-st.title("💪 매니저님의 데이터 센터")
+st.title("Workout Log")
 
 with st.sidebar:
     st.header("⚡ 데이터 관리")
     if st.button("🏋️ 근력 운동 계산 (유산소 제외)"):
         with st.spinner("계산 중..."): st.success(calculate_past_workout_stats())
-    if st.button("🥗 식단 빈칸 채우기"):
+    if st.button("🥗 식단 빈칸 계"):
         with st.spinner("분석 중..."): st.success(fill_past_diet_blanks(get_user_profile()))
 
 if "messages" not in st.session_state: st.session_state.messages = []
@@ -223,3 +223,4 @@ if prompt := st.chat_input("기록할 내용을 입력하세요..."):
 
         st.chat_message("assistant").markdown(reply)
         st.session_state.messages.append({"role": "assistant", "content": reply})
+
