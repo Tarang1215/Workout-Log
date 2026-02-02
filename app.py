@@ -44,7 +44,7 @@ except Exception as e:
     st.stop()
 
 # ==========================================
-# 2. JSON 가이드 (유산소 매핑 규칙 추가)
+# 2. JSON 가이드
 # ==========================================
 JSON_GUIDE = """
 **[작동 규칙]**
@@ -67,7 +67,6 @@ def get_user_profile():
 def calculate_past_workout_stats():
     """근력 운동 시트만 계산 (유산소 제외)"""
     try:
-        # 유산소는 계산 대상에서 제외
         sheet_list = ["등", "가슴", "하체", "어깨", "이두", "삼두", "복근", "기타"]
         total_updated = 0
         
@@ -111,11 +110,13 @@ def calculate_past_workout_stats():
                                 total_updated += 1
                                 time.sleep(0.5)
                         except: continue
+            except: continue  # <--- [수정 완료] 아까 빼먹은 짝꿍을 넣었습니다!
+
         return f"근력 운동 {total_updated}건 계산 완료 (유산소 제외)"
     except Exception as e: return f"오류: {e}"
 
 def fill_past_diet_blanks(profile_txt):
-    """식단 빈칸 채우기 (기존 동일)"""
+    """식단 빈칸 채우기"""
     try:
         ws = spreadsheet.worksheet("식단")
         rows = ws.get_all_values()
@@ -211,13 +212,10 @@ if prompt := st.chat_input("기록할 내용을 입력하세요..."):
                         ws = spreadsheet.worksheet(d.get('target_sheet'))
                         today = datetime.datetime.now().strftime("%Y-%m-%d")
                         
-                        # 🔴 [핵심 변경] 유산소 vs 근력 운동 분기 처리
+                        # 유산소 vs 근력 운동 분기 처리
                         if d.get('target_sheet') == "유산소":
-                            # 유산소: [날짜, 종목, 시간(sets), 속도/강도(weight), 비고(note)]
-                            # JSON의 sets -> 시간, weight -> 강도 로 매핑해서 넣음
                             ws.append_row([today, d.get('exercise'), d.get('sets'), d.get('weight'), d.get('note')])
                         else:
-                            # 근력: [날짜, 종목, 세트, 무게, 횟수, 1RM, 볼륨, 비고] (기존 8열)
                             ws.append_row([today, d.get('exercise'), d.get('sets'), d.get('weight'), d.get('reps'), d.get('onerm'), d.get('volume'), d.get('note')])
                         cnt += 1
                     reply = f"🏋️ {cnt}건 기록 완료."
