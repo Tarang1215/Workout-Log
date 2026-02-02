@@ -13,14 +13,18 @@ import time
 # ==========================================
 # 1. 환경 설정 및 모델 고정
 # ==========================================
-st.set_page_config(page_title="June's Workout", layout="wide")
+st.set_page_config(page_title="Google Workout", page_icon="💪", layout="wide")
 SHEET_NAME = "운동일지_DB"
 
 # [절대 준수] 매니저님 지정 모델 리스트
+# (주의: 실제 API에서 지원하지 않는 모델명일 경우 에러가 발생하며, 에러 메시지를 통해 확인할 수 있습니다.)
 MODEL_CANDIDATES = [
     "gemini-3-pro-preview",
     "gemini-3-flash-preview", 
-    "gemini-2.5-flash"
+    "gemini-2.5-flash",
+    # 비상용 백업 (위 모델들이 안 될 경우를 대비해 필요시 주석 해제하세요)
+    # "gemini-2.0-flash-exp", 
+    # "gemini-1.5-pro"
 ]
 
 # 클라우드 Secrets 인증
@@ -110,7 +114,7 @@ def calculate_past_workout_stats():
                                 total_updated += 1
                                 time.sleep(0.5)
                         except: continue
-            except: continue  # <--- [수정 완료] 아까 빼먹은 짝꿍을 넣었습니다!
+            except: continue
 
         return f"근력 운동 {total_updated}건 계산 완료 (유산소 제외)"
     except Exception as e: return f"오류: {e}"
@@ -123,28 +127,39 @@ def fill_past_diet_blanks(profile_txt):
         try:
             idx_total = next(i for i, h in enumerate(rows[0]) if "Total" in h)
             idx_score = next(i for i, h in enumerate(rows[0]) if "Score" in h)
-        except: return "헤더 오류"
+        except: return "식단 시트 헤더를 찾을 수 없습니다."
 
         updates_needed = []
         for i, row in enumerate(rows[1:], start=2):
             is_empty = (len(row) <= idx_total) or (not row[idx_total])
             has_content = any(row[j] for j in range(1, idx_total) if len(row) > j and row[j])
             if is_empty and has_content:
-                updates_needed.append(f"Row {i}: " + ", ".join([f"{rows[0][j]}:{row[j]}" for j in range(1, idx_total) if len(row) > j and row[j]]))
+                # 데이터가 너무 길어지면 에러가 날 수 있으므로 최근 20개까지만 처리하거나 나눠서 처리 권장
+                row_data = ", ".join([f"{rows[0][j]}:{row[j]}" for j in range(1, idx_total) if len(row) > j and row[j]])
+                updates_needed.append(f"Row {i}: {row_data}")
         
-        if not updates_needed: return "채울 빈칸 없음"
+        if not updates_needed: return "채울 빈칸이 없습니다."
 
         prompt = f"영양사로서 다음 식단의 Total Input, Score를 계산해 JSON List로 반환.\n프로필: {profile_txt}\n데이터: {chr(10).join(updates_needed)}\nOutput format: [{{'row': 2, 'total_input': '...', 'score': 80}}]"
         
         result = None
+        last_error = ""
+        
         for model in MODEL_CANDIDATES:
             try:
-                response = client_ai.models.generate_content(model=model, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
+                response = client_ai.models.generate_content(
+                    model=model, 
+                    contents=prompt, 
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
                 result = json.loads(response.text)
                 break
-            except: continue
+            except Exception as e: 
+                last_error = str(e)
+                continue
             
-        if not result: return "AI 응답 실패"
+        if not result: 
+            return f"AI 응답 실패. (마지막 에러: {last_error})"
 
         cnt = 0
         for item in result:
@@ -161,11 +176,19 @@ def fill_past_diet_blanks(profile_txt):
 st.title("Google Workout")
 
 with st.sidebar:
-    st.header("⚡ Workout Log")
-    if st.button("🏋️ 근력 운동 계산 (유산소 제외)"):
+    st.header("Workout Log") # [요청반영] 타이틀 변경
+    
+    # [요청반영] 버튼 텍스트 축소 및 기능 연결
+    if st.button("🏋️ 근력 운동 계산"):
         with st.spinner("계산 중..."): st.success(calculate_past_workout_stats())
-    if st.button("🥗 식단 빈칸 계"):
-        with st.spinner("분석 중..."): st.success(fill_past_diet_blanks(get_user_profile()))
+        
+    if st.button("🥗 식단 빈칸 계산"):
+        with st.spinner("AI 분석 중... (시간이 좀 걸립니다)"): 
+            msg = fill_past_diet_blanks(get_user_profile())
+            if "실패" in msg:
+                st.error(msg)
+            else:
+                st.success(msg)
 
 if "messages" not in st.session_state: st.session_state.messages = []
 for msg in st.session_state.messages:
@@ -196,7 +219,7 @@ if prompt := st.chat_input("기록할 내용을 입력하세요..."):
             except: continue
 
         reply = ""
-        if not result: reply = "❌ 응답 실패 (API 확인 필요)"
+        if not result: reply = "❌ 응답 실패 (API 할당량 또는 모델명을 확인해주세요)"
         else:
             try:
                 if result.get('type') == 'chat': reply = result.get('response')
@@ -223,5 +246,3 @@ if prompt := st.chat_input("기록할 내용을 입력하세요..."):
 
         st.chat_message("assistant").markdown(reply)
         st.session_state.messages.append({"role": "assistant", "content": reply})
-
-
