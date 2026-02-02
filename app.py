@@ -11,13 +11,21 @@ import json
 from PIL import Image
 
 # ==========================================
-# 1. 환경 설정
+# 1. 환경 설정 (클라우드 전용)
 # ==========================================
-BASE_DIR = r"C:\Users\USER\Desktop"
-JSON_FILE = os.path.join(BASE_DIR, "service_account.json")
-GEMINI_API_KEY = "AIzaSyA29ShLm3ZSOhYCR1Qfut6fa-7POJ_VyC4"
+# ⚠️ 내 컴퓨터 경로(BASE_DIR)는 클라우드에서 필요 없으므로 삭제했습니다.
+# 대신 Streamlit Secrets에서 정보를 가져옵니다.
+
 SHEET_NAME = "운동일지_DB"
 
+# Secrets에서 API 키 가져오기
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+except Exception as e:
+    st.error("❌ Secrets에서 GEMINI_API_KEY를 찾을 수 없습니다.")
+    st.stop()
+
+# 모델 설정 (요청하신 그대로 유지)
 MODEL_CANDIDATES = [
     "gemini-3-pro-preview",
     "gemini-3-flash-preview", 
@@ -25,7 +33,7 @@ MODEL_CANDIDATES = [
 ]
 
 # ==========================================
-# 2. 프롬프트 가이드
+# 2. 프롬프트 가이드 (기존 동일)
 # ==========================================
 JSON_GUIDE_PROMPT = """
 **[작동 규칙]**
@@ -55,32 +63,35 @@ User의 입력(텍스트 또는 이미지)을 분석하여 **[단순 대화]**�
 """
 
 # ==========================================
-# 3. 연결 및 함수
+# 3. 연결 및 함수 (클라우드 인증 방식 적용)
 # ==========================================
 st.set_page_config(page_title="My Workout Analyst", page_icon="📈", layout="wide")
 
 # 사이드바 (기능 모음)
 with st.sidebar:
-    st.header("🔥 매니저님 전용")
-    st.write("데이터 기반 의사결정 지원 시스템")
+    st.header("Workout Log")
+    st.write("made by & for June")
     
-# 구글 시트 인증
+# 구글 시트 인증 (Secrets 사용)
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 try:
-    creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_FILE, scope)
+    # 🔴 [변경] 로컬 파일 대신 Secrets에 있는 정보를 딕셔너리로 변환하여 사용
+    credentials_dict = dict(st.secrets["gcp_service_account"])
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(credentials_dict, scope)
     client_sheet = gspread.authorize(creds)
     spreadsheet = client_sheet.open(SHEET_NAME)
 except Exception as e:
-    st.error(f"❌ 시트 연결 실패: {e}")
+    st.error(f"❌ 시트 연결 실패 (Secrets 설정을 확인하세요): {e}")
     st.stop()
 
+# Gemini 인증
 try:
     client_ai = genai.Client(api_key=GEMINI_API_KEY)
 except Exception as e:
     st.error(f"❌ Gemini 연결 실패: {e}")
     st.stop()
 
-# --- 데이터 핸들링 함수들 ---
+# --- 데이터 핸들링 함수들 (기존 동일) ---
 def get_user_profile():
     try:
         ws = spreadsheet.worksheet("프로필")
@@ -121,7 +132,7 @@ def get_weekly_data():
     except Exception as e:
         return f"데이터 로드 실패: {e}"
 
-# --- 기록 업데이트 함수들 ---
+# --- 기록 업데이트 함수들 (기존 동일) ---
 def update_diet_sheet(date_str, data):
     try:
         ws = spreadsheet.worksheet("식단")
@@ -157,7 +168,7 @@ def update_summary_log(date_str, summary_data):
     except: return "통합로그 에러"
 
 # ==========================================
-# 4. 메인 UI 및 로직
+# 4. 메인 UI 및 로직 (기존 동일)
 # ==========================================
 st.title("Google Workout")
 
@@ -283,4 +294,5 @@ User의 입력(텍스트/이미지)을 분석하여 적절한 JSON을 생성하�
         with st.chat_message("assistant"):
             st.markdown(bot_reply)
         st.session_state.messages.append({"role": "assistant", "content": bot_reply})
+
         save_chat_message("assistant", bot_reply)
