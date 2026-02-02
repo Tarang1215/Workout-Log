@@ -9,6 +9,7 @@ import json
 from PIL import Image
 import re
 import time
+import os
 
 # ==========================================
 # 1. 환경 설정 및 모델 고정
@@ -17,27 +18,32 @@ st.set_page_config(page_title="Google Workout", page_icon="💪", layout="wide")
 SHEET_NAME = "운동일지_DB"
 
 # [절대 준수] 매니저님 지정 모델 리스트
-# (주의: 실제 API에서 지원하지 않는 모델명일 경우 에러가 발생하며, 에러 메시지를 통해 확인할 수 있습니다.)
 MODEL_CANDIDATES = [
     "gemini-3-pro-preview",
     "gemini-3-flash-preview", 
     "gemini-2.5-flash",
-    # 비상용 백업 (위 모델들이 안 될 경우를 대비해 필요시 주석 해제하세요)
-    # "gemini-2.0-flash-exp", 
-    # "gemini-1.5-pro"
 ]
 
-# 클라우드 Secrets 인증
+# 클라우드 Secrets 인증 (이제 코드에 키를 적지 않습니다)
 try:
     if "GEMINI_API_KEY" in st.secrets:
         GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"])
     else:
-        # 로컬 테스트용
+        # 로컬 테스트용 (파일이 있을 때만 작동)
+        # 주의: GitHub에 올릴 때는 절대 여기에 키를 적지 마세요.
         BASE_DIR = r"C:\Users\USER\Desktop"
-        GEMINI_API_KEY = "AIzaSyA29ShLm3ZSOhYCR1Qfut6fa-7POJ_VyC4"
-        creds = ServiceAccountCredentials.from_json_keyfile_name(f"{BASE_DIR}/service_account.json", ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"])
+        json_path = os.path.join(BASE_DIR, "service_account.json")
+        
+        if os.path.exists(json_path):
+             # 로컬에서만 쓰는 비밀 파일에서 키를 읽어오거나, 환경변수 사용 권장
+             # 여기서는 안전을 위해 하드코딩 제거함
+             st.error("로컬 테스트 시 Secrets 설정이 필요합니다.")
+             st.stop()
+        else:
+            st.error("Secrets 설정을 찾을 수 없습니다.")
+            st.stop()
 
     client_sheet = gspread.authorize(creds)
     spreadsheet = client_sheet.open(SHEET_NAME)
@@ -176,9 +182,8 @@ def fill_past_diet_blanks(profile_txt):
 st.title("Google Workout")
 
 with st.sidebar:
-    st.header("Workout Log") # [요청반영] 타이틀 변경
+    st.header("Workout Log") 
     
-    # [요청반영] 버튼 텍스트 축소 및 기능 연결
     if st.button("🏋️ 근력 운동 계산"):
         with st.spinner("계산 중..."): st.success(calculate_past_workout_stats())
         
@@ -219,7 +224,7 @@ if prompt := st.chat_input("기록할 내용을 입력하세요..."):
             except: continue
 
         reply = ""
-        if not result: reply = "❌ 응답 실패 (API 할당량 또는 모델명을 확인해주세요)"
+        if not result: reply = "❌ 응답 실패 (새로운 API 키로 교체했는지 확인해주세요)"
         else:
             try:
                 if result.get('type') == 'chat': reply = result.get('response')
