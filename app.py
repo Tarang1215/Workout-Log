@@ -21,13 +21,7 @@ SHEET_NAME = "운동일지_DB"
 
 USER_ROUTINE = """
 **[매니저님 루틴]**
-- 화: 가슴
-- 수: 등
-- 목: 어깨
-- 금: 휴식 (또는 보충)
-- 토: 하체
-- 일: 팔, 복근, 인터벌러닝
-- 월: 휴식
+- 화: 가슴 / 수: 등 / 목: 어깨 / 금: 휴식 / 토: 하체 / 일: 팔, 복근, 인터벌 / 월: 휴식
 """
 
 MODEL_CANDIDATES = [
@@ -65,20 +59,25 @@ SCORING_RULES = """
 **[User 스펙: 183cm/82kg/골격근41kg, 커팅중]**
 1. **단백질:** 120g 미만 감점. (목표: 체중x1.5~2.0)
 2. **운동/식단:** 운동한 날 탄수화물은 OK. 휴식일 고탄수는 감점.
-3. **포맷:** 음식은 '+'로 연결. Total Input은 "C:.. P:.. F:.. (비율)"
 """
 
 JSON_GUIDE = """
 **[작동 규칙]**
-1. 식단: { "type": "diet", "data": { "breakfast": "...", "lunch": "...", "snack": "...", "dinner": "...", "total_input": "...", "score": "...", "comment": "..." } }
-2. 운동: 
-   - 세트별 무게 다르면 "20, 40, 60" (콤마 구분).
+1. **식단 기록 (자연어 처리):**
+   - User가 "점심에 A랑 B 먹었어"라고 하면 -> {"lunch": "A + B"} 형태로 변환.
+   - 아침, 점심, 저녁, 간식 중 언급된 것만 채우고 나머지는 null.
+   - Total Input과 Score는 비워둘 것 (나중에 '식단 빈칸 계산' 버튼으로 채움).
+   { "type": "diet", "data": { "breakfast": "...", "lunch": "...", "snack": "...", "dinner": "...", "supplement": "..." } }
+
+2. **운동 기록:** - 세트별 무게 다르면 "20, 40, 60" (콤마 구분).
    - 유산소는 sets=분, weight=강도.
    { "type": "workout", "details": [ { "target_sheet": "...", "exercise": "...", "sets": "...", "weight": "...", "reps": "...", "note": "..." } ] }
+   
+3. **단순 대화:** { "type": "chat", "response": "..." }
 """
 
 # ==========================================
-# 3. 핵심 함수들 (생략 없음)
+# 3. 핵심 함수들 (전체 복구됨)
 # ==========================================
 def get_user_profile():
     try:
@@ -96,7 +95,7 @@ def get_workout_volume_dict():
         return vol_dict
     except: return {}
 
-# [기능 1] 운동 계산 및 코멘트 (유산소/복근 포함)
+# [기능 1] 운동 계산 및 코멘트
 def calculate_past_workout_stats():
     try:
         sheet_list = ["등", "가슴", "하체", "어깨", "이두", "삼두", "복근", "기타", "유산소"]
@@ -107,7 +106,6 @@ def calculate_past_workout_stats():
                 ws = spreadsheet.worksheet(sheet_name)
                 rows = ws.get_all_values()
                 if len(rows) < 2: continue
-                
                 header = rows[0]
                 
                 # 인덱스 찾기
@@ -130,7 +128,7 @@ def calculate_past_workout_stats():
                 for i, row in enumerate(rows[1:], start=2):
                     current_note = row[idx_note] if len(row) > idx_note else ""
                     
-                    # A. 유산소 처리 (코멘트만)
+                    # A. 유산소
                     if sheet_name == "유산소":
                         time_str = str(row[idx_time]).strip()
                         int_str = str(row[idx_intensity]).strip()
@@ -143,14 +141,14 @@ def calculate_past_workout_stats():
                                 time.sleep(1)
                             except: pass
 
-                    # B. 근력 처리 (계산 + 코멘트)
+                    # B. 근력
                     else:
                         sets_str = str(row[idx_set]).strip()
                         w_str = str(row[idx_w]).strip()
                         r_str = str(row[idx_r]).strip()
                         current_vol = row[idx_vol] if len(row) > idx_vol else ""
 
-                        # 볼륨/1RM 계산
+                        # 계산
                         if not current_vol and w_str and r_str:
                             try:
                                 weights = [float(x) for x in re.findall(r"[\d\.]+", w_str)]
@@ -168,19 +166,17 @@ def calculate_past_workout_stats():
                                     onerm_val = max(weights) * (1 + (reps[weights.index(max(weights))] if len(reps) > weights.index(max(weights)) else 0)/30)
                                 else:
                                     w_val = weights[0]
-                                    if len(reps) > 1:
-                                        vol_val = w_val * sum(reps)
-                                        onerm_val = w_val * (1 + reps[0]/30)
+                                    if len(reps) > 1: vol_val = w_val * sum(reps)
                                     else:
                                         r_val = reps[0] if reps else 0
                                         vol_val = w_val * r_val * sets_val
-                                        onerm_val = w_val * (1 + r_val/30)
+                                    onerm_val = w_val * (1 + (reps[0] if reps else 0)/30)
 
                                 ws.update_cell(i, idx_1rm + 1, int(onerm_val))
                                 ws.update_cell(i, idx_vol + 1, int(vol_val))
                             except: pass
 
-                        # AI 코멘트 (비고 비어있으면)
+                        # 코멘트
                         if not current_note and (w_str or r_str or sets_str):
                             try:
                                 prompt = f"헬스 코치로서 피드백 1줄(존댓말). 종목:{row[1]}, 세트:{sets_str}, 무게:{w_str}, 횟수:{r_str}."
@@ -193,7 +189,7 @@ def calculate_past_workout_stats():
         return f"총 {total_updated}건 계산 및 코멘트 작성 완료"
     except Exception as e: return f"오류: {e}"
 
-# [기능 2] 식단 빈칸 채우기
+# [기능 2] 식단 빈칸 채우기 (Total Input, Score)
 def fill_past_diet_blanks(profile_txt):
     try:
         ws = spreadsheet.worksheet("식단")
@@ -249,11 +245,10 @@ def fill_past_diet_blanks(profile_txt):
         return f"{cnt}건 식단 업데이트 완료"
     except Exception as e: return f"오류: {e}"
 
-# [기능 3] 통합로그 취합 (오늘 운동)
+# [기능 3] 통합로그 취합
 def update_daily_summary():
     today = datetime.datetime.now().strftime("%Y-%m-%d")
     sheet_list = ["등", "가슴", "하체", "어깨", "이두", "삼두", "복근", "기타", "유산소"]
-    
     total_vol = 0
     main_parts = []
     main_exercises = []
@@ -267,8 +262,6 @@ def update_daily_summary():
             if today_rows:
                 main_parts.append(sheet)
                 if not main_exercises: main_exercises.append(today_rows[0][1])
-                
-                # 볼륨 합산 (유산소 제외)
                 if sheet != "유산소":
                     try:
                         idx_vol = next(i for i, h in enumerate(rows[0]) if "볼륨" in h)
@@ -288,8 +281,7 @@ def update_daily_summary():
         row_data = [today, parts_str, main_ex_str, sub_ex_str, total_vol, ""]
         
         if cell:
-            for i, val in enumerate(row_data):
-                summ_ws.update_cell(cell.row, i+1, val)
+            for i, val in enumerate(row_data): summ_ws.update_cell(cell.row, i+1, val)
             return f"업데이트 완료: {parts_str}"
         else:
             summ_ws.append_row(row_data)
@@ -299,7 +291,6 @@ def update_daily_summary():
 # [기능 4] 주간 리포트 이메일
 def generate_and_send_report():
     if not GMAIL_ID or not GMAIL_PW: return "❌ 이메일 설정이 없습니다."
-    
     try:
         diet_ws = spreadsheet.worksheet("식단")
         log_ws = spreadsheet.worksheet("통합로그")
@@ -314,13 +305,12 @@ def generate_and_send_report():
         [지난주 운동]: {log_data}
         """
         response = client_ai.models.generate_content(model="gemini-3-pro-preview", contents=prompt)
-        report_text = response.text
-
+        
         msg = MIMEMultipart()
         msg['From'] = GMAIL_ID
         msg['To'] = GMAIL_ID
         msg['Subject'] = f"[{datetime.datetime.now().strftime('%Y-%m-%d')}] 주간 운동 리포트"
-        msg.attach(MIMEText(report_text, 'plain'))
+        msg.attach(MIMEText(response.text, 'plain'))
 
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
@@ -384,25 +374,54 @@ if prompt := st.chat_input("입력하세요..."):
         if not result: reply = "❌ 응답 실패 (API 키 확인)"
         else:
             try:
-                # [핵심 수정] 리스트/딕셔너리 호환 처리
-                if result.get('type') == 'chat': 
-                    reply = result.get('response')
+                # [핵심 수정] 리스트/딕셔너리 호환 처리 (이제 에러 안 남)
+                raw_data = result
+                # 리스트면 첫 번째 요소 사용, 딕셔너리면 그대로 사용
+                if isinstance(raw_data, list):
+                    response_obj = raw_data[0]
+                    data_list = raw_data
+                else:
+                    response_obj = raw_data
+                    data_list = [raw_data.get('data')] if raw_data.get('type') == 'diet' else [raw_data.get('details')]
+
+                # 타입별 처리
+                if response_obj.get('type') == 'chat': 
+                    reply = response_obj.get('response')
                 
-                elif result.get('type') == 'diet':
+                elif response_obj.get('type') == 'diet':
                     ws = spreadsheet.worksheet("식단")
                     today = datetime.datetime.now().strftime("%Y-%m-%d")
                     
-                    raw_data = result['data']
-                    data_list = raw_data if isinstance(raw_data, list) else [raw_data]
+                    # 오늘 날짜 행 찾기 (없으면 추가, 있으면 업데이트)
+                    cell = ws.find(today)
                     
-                    for d in data_list:
-                        ws.append_row([today, d.get('breakfast'), d.get('lunch'), d.get('snack'), d.get('dinner'), d.get('supplement'), d.get('total_input'), d.get('score'), d.get('comment')])
+                    # 리스트가 아니라 data 객체 자체를 가져옴
+                    diet_data = response_obj.get('data', {})
                     
-                    reply = f"🥗 식단 기록 완료. (점수: {data_list[0].get('score')})"
+                    # 업데이트할 내용 매핑
+                    col_map = {
+                        2: diet_data.get('breakfast'),
+                        3: diet_data.get('lunch'),
+                        4: diet_data.get('snack'),
+                        5: diet_data.get('dinner'),
+                        6: diet_data.get('supplement')
+                    }
+                    
+                    if cell:
+                        # 이미 오늘 행이 있으면 빈칸만 채우거나 덮어쓰기
+                        for col, val in col_map.items():
+                            if val: ws.update_cell(cell.row, col, val)
+                        reply = f"🥗 오늘 식단 업데이트 완료: {diet_data}"
+                    else:
+                        # 오늘 행이 없으면 새로 추가
+                        ws.append_row([today, diet_data.get('breakfast'), diet_data.get('lunch'), diet_data.get('snack'), diet_data.get('dinner'), diet_data.get('supplement'), "", "", ""])
+                        reply = f"🥗 식단 기록 완료."
 
-                elif result.get('type') == 'workout':
+                elif response_obj.get('type') == 'workout':
                     cnt = 0
-                    for d in result.get('details', []):
+                    # details가 리스트임
+                    details = response_obj.get('details', [])
+                    for d in details:
                         ws = spreadsheet.worksheet(d.get('target_sheet'))
                         today = datetime.datetime.now().strftime("%Y-%m-%d")
                         if d.get('target_sheet') == "유산소":
