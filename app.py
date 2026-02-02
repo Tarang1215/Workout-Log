@@ -13,7 +13,7 @@ import time
 # ==========================================
 # 1. 환경 설정 및 모델 고정
 # ==========================================
-st.set_page_config(page_title="My Workout Analyst", page_icon="💪", layout="wide")
+st.set_page_config(page_title="June's Workout", layout="wide")
 SHEET_NAME = "운동일지_DB"
 
 # [절대 준수] 매니저님 지정 모델 리스트
@@ -158,10 +158,10 @@ def fill_past_diet_blanks(profile_txt):
 # ==========================================
 # 4. 메인 UI
 # ==========================================
-st.title("Workout Log")
+st.title("Google Workout")
 
 with st.sidebar:
-    st.header("⚡ 데이터 관리")
+    st.header("⚡ Workout Log")
     if st.button("🏋️ 근력 운동 계산 (유산소 제외)"):
         with st.spinner("계산 중..."): st.success(calculate_past_workout_stats())
     if st.button("🥗 식단 빈칸 계"):
@@ -223,4 +223,5 @@ if prompt := st.chat_input("기록할 내용을 입력하세요..."):
 
         st.chat_message("assistant").markdown(reply)
         st.session_state.messages.append({"role": "assistant", "content": reply})
+
 
