@@ -4,7 +4,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 from google import genai
 from google.genai import types
 import datetime
-from datetime import timedelta
 import pandas as pd
 import json
 from PIL import Image
@@ -15,13 +14,13 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # ==========================================
-# 1. 환경 설정 및 루틴 정의
+# 1. 환경 설정 및 루틴
 # ==========================================
 st.set_page_config(page_title="Google Workout", page_icon="💪", layout="wide")
 SHEET_NAME = "운동일지_DB"
 
-# [매니저님 루틴 정보]
 USER_ROUTINE = """
+**[매니저님 루틴]**
 - 화: 가슴
 - 수: 등
 - 목: 어깨
@@ -31,7 +30,6 @@ USER_ROUTINE = """
 - 월: 휴식
 """
 
-# [모델 리스트]
 MODEL_CANDIDATES = [
     "gemini-3-pro-preview",
     "gemini-3-flash-preview", 
@@ -45,7 +43,7 @@ try:
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"])
         
-        # 이메일 설정 (없으면 기능 비활성화)
+        # 이메일 설정 (없으면 None)
         GMAIL_ID = st.secrets.get("GMAIL_ID")
         GMAIL_PW = st.secrets.get("GMAIL_APP_PW")
     else:
@@ -61,18 +59,18 @@ except Exception as e:
     st.stop()
 
 # ==========================================
-# 2. JSON 가이드 & 프롬프트
+# 2. 프롬프트 가이드
 # ==========================================
 SCORING_RULES = """
 **[User 스펙: 183cm/82kg/골격근41kg, 커팅중]**
-1. **단백질:** 120g 미만 감점.
+1. **단백질:** 120g 미만 감점. (목표: 체중x1.5~2.0)
 2. **운동/식단:** 운동한 날 탄수화물은 OK. 휴식일 고탄수는 감점.
-3. **포맷:** 음식은 '+'로 연결해서 기록.
+3. **포맷:** 음식은 '+'로 연결. Total Input은 "C:.. P:.. F:.. (비율)"
 """
 
 JSON_GUIDE = """
-**[출력 규칙]**
-1. 식단: { "type": "diet", "data": { "breakfast": "...", "lunch": "...", "snack": "...", "dinner": "...", "total_input": "C:.. P:.. F:..", "score": 85, "comment": "..." } }
+**[작동 규칙]**
+1. 식단: { "type": "diet", "data": { "breakfast": "...", "lunch": "...", "snack": "...", "dinner": "...", "total_input": "...", "score": "...", "comment": "..." } }
 2. 운동: 
    - 세트별 무게 다르면 "20, 40, 60" (콤마 구분).
    - 유산소는 sets=분, weight=강도.
@@ -80,65 +78,179 @@ JSON_GUIDE = """
 """
 
 # ==========================================
-# 3. 기능 함수들
+# 3. 핵심 함수들 (생략 없음)
 # ==========================================
-def get_profile():
-    try: return "\n".join([f"- {r[0]}: {r[1]}" for r in spreadsheet.worksheet("프로필").get_all_values() if len(r)>=2])
-    except: return ""
-
-def send_email_report(report_text):
-    """이메일 발송 함수"""
-    if not GMAIL_ID or not GMAIL_PW:
-        return "❌ 이메일 설정(Secrets)이 없습니다."
-    
+def get_user_profile():
     try:
-        msg = MIMEMultipart()
-        msg['From'] = GMAIL_ID
-        msg['To'] = GMAIL_ID
-        msg['Subject'] = f"[{datetime.datetime.now().strftime('%Y-%m-%d')}] 주간 운동/식단 보고서"
-        msg.attach(MIMEText(report_text, 'plain'))
+        return "\n".join([f"- {row[0]}: {row[1]}" for row in spreadsheet.worksheet("프로필").get_all_values() if len(row) >= 2])
+    except: return "프로필 없음"
 
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(GMAIL_ID, GMAIL_PW)
-        server.sendmail(GMAIL_ID, GMAIL_ID, msg.as_string())
-        server.quit()
-        return "📧 이메일 발송 성공!"
-    except Exception as e:
-        return f"❌ 이메일 발송 실패: {e}"
-
-def generate_weekly_report():
-    """지난 7일간 데이터를 긁어와서 AI 리포트 생성"""
+def get_workout_volume_dict():
     try:
-        # 최근 7일 식단/운동 데이터 가져오기 (로직 간소화)
-        diet_ws = spreadsheet.worksheet("식단")
-        log_ws = spreadsheet.worksheet("통합로그")
+        ws = spreadsheet.worksheet("통합로그")
+        rows = ws.get_all_values()
+        vol_dict = {}
+        for row in rows[1:]:
+            if len(row) > 4:
+                vol_dict[row[0]] = f"{row[1]} / {row[4]}kg"
+        return vol_dict
+    except: return {}
+
+# [기능 1] 운동 계산 및 코멘트 (유산소/복근 포함)
+def calculate_past_workout_stats():
+    try:
+        sheet_list = ["등", "가슴", "하체", "어깨", "이두", "삼두", "복근", "기타", "유산소"]
+        total_updated = 0
         
-        diet_data = diet_ws.get_all_values()[-7:] # 최근 7행
-        log_data = log_ws.get_all_values()[-7:]
+        for sheet_name in sheet_list:
+            try:
+                ws = spreadsheet.worksheet(sheet_name)
+                rows = ws.get_all_values()
+                if len(rows) < 2: continue
+                
+                header = rows[0]
+                
+                # 인덱스 찾기
+                if sheet_name == "유산소":
+                    try:
+                        idx_time = next(i for i, h in enumerate(header) if "시간" in h or "세트" in h)
+                        idx_intensity = next(i for i, h in enumerate(header) if "속도" in h or "강도" in h or "무게" in h)
+                        idx_note = next(i for i, h in enumerate(header) if "비고" in h)
+                    except: continue
+                else:
+                    try:
+                        idx_set = next(i for i, h in enumerate(header) if "세트" in h)
+                        idx_w = next(i for i, h in enumerate(header) if "무게" in h)
+                        idx_r = next(i for i, h in enumerate(header) if "횟수" in h)
+                        idx_1rm = next(i for i, h in enumerate(header) if "1RM" in h)
+                        idx_vol = next(i for i, h in enumerate(header) if "볼륨" in h)
+                        idx_note = next(i for i, h in enumerate(header) if "비고" in h)
+                    except: continue
+
+                for i, row in enumerate(rows[1:], start=2):
+                    current_note = row[idx_note] if len(row) > idx_note else ""
+                    
+                    # A. 유산소 처리 (코멘트만)
+                    if sheet_name == "유산소":
+                        time_str = str(row[idx_time]).strip()
+                        int_str = str(row[idx_intensity]).strip()
+                        if not current_note and (time_str or int_str):
+                            try:
+                                prompt = f"헬스 코치로서 유산소 피드백 1줄(존댓말). 종목:{row[1]}, 시간:{time_str}, 강도:{int_str}. User: 82kg 상급자."
+                                response = client_ai.models.generate_content(model="gemini-3-flash-preview", contents=prompt)
+                                ws.update_cell(i, idx_note + 1, response.text.strip())
+                                total_updated += 1
+                                time.sleep(1)
+                            except: pass
+
+                    # B. 근력 처리 (계산 + 코멘트)
+                    else:
+                        sets_str = str(row[idx_set]).strip()
+                        w_str = str(row[idx_w]).strip()
+                        r_str = str(row[idx_r]).strip()
+                        current_vol = row[idx_vol] if len(row) > idx_vol else ""
+
+                        # 볼륨/1RM 계산
+                        if not current_vol and w_str and r_str:
+                            try:
+                                weights = [float(x) for x in re.findall(r"[\d\.]+", w_str)]
+                                reps = [float(x) for x in re.findall(r"[\d\.]+", r_str)]
+                                sets_val = float(re.findall(r"[\d\.]+", sets_str)[0]) if re.findall(r"[\d\.]+", sets_str) else 1.0
+
+                                vol_val = 0
+                                onerm_val = 0
+                                
+                                if len(weights) > 1:
+                                    if len(reps) == len(weights): vol_val = sum(w * r for w, r in zip(weights, reps))
+                                    else: 
+                                        r_val = reps[0] if reps else 0
+                                        vol_val = sum(w * r_val for w in weights)
+                                    onerm_val = max(weights) * (1 + (reps[weights.index(max(weights))] if len(reps) > weights.index(max(weights)) else 0)/30)
+                                else:
+                                    w_val = weights[0]
+                                    if len(reps) > 1:
+                                        vol_val = w_val * sum(reps)
+                                        onerm_val = w_val * (1 + reps[0]/30)
+                                    else:
+                                        r_val = reps[0] if reps else 0
+                                        vol_val = w_val * r_val * sets_val
+                                        onerm_val = w_val * (1 + r_val/30)
+
+                                ws.update_cell(i, idx_1rm + 1, int(onerm_val))
+                                ws.update_cell(i, idx_vol + 1, int(vol_val))
+                            except: pass
+
+                        # AI 코멘트 (비고 비어있으면)
+                        if not current_note and (w_str or r_str or sets_str):
+                            try:
+                                prompt = f"헬스 코치로서 피드백 1줄(존댓말). 종목:{row[1]}, 세트:{sets_str}, 무게:{w_str}, 횟수:{r_str}."
+                                response = client_ai.models.generate_content(model="gemini-3-flash-preview", contents=prompt)
+                                ws.update_cell(i, idx_note + 1, response.text.strip())
+                                total_updated += 1
+                                time.sleep(1)
+                            except: pass
+            except: continue
+        return f"총 {total_updated}건 계산 및 코멘트 작성 완료"
+    except Exception as e: return f"오류: {e}"
+
+# [기능 2] 식단 빈칸 채우기
+def fill_past_diet_blanks(profile_txt):
+    try:
+        ws = spreadsheet.worksheet("식단")
+        rows = ws.get_all_values()
+        try:
+            idx_total = next(i for i, h in enumerate(rows[0]) if "Total" in h)
+            idx_score = next(i for i, h in enumerate(rows[0]) if "Score" in h)
+            idx_comment = 8 
+        except: return "식단 헤더 확인 필요"
+
+        workout_history = get_workout_volume_dict()
+        updates_needed = []
         
+        for i, row in enumerate(rows[1:], start=2):
+            is_empty = (len(row) <= idx_total) or (not row[idx_total])
+            has_content = any(row[j] for j in range(1, idx_total) if len(row) > j and row[j])
+            
+            if is_empty and has_content:
+                date = row[0]
+                workout_info = workout_history.get(date, "휴식")
+                row_data = ", ".join([f"{rows[0][j]}:{row[j]}" for j in range(1, idx_total) if len(row) > j and row[j]])
+                updates_needed.append(f"Row {i} [{date}]: 식단({row_data}) / 운동({workout_info})")
+        
+        if not updates_needed: return "채울 빈칸이 없습니다."
+
         prompt = f"""
-        당신은 펀드매니저의 퍼스널 트레이너입니다. 지난주 데이터를 보고 주간 보고서를 작성하세요.
-        
-        [프로필]: {get_profile()}
-        [지난주 식단]: {diet_data}
-        [지난주 운동]: {log_data}
-        
-        **작성 양식:**
-        1. **종합 평가:** (한 줄 요약)
-        2. **식단 분석:** (식단 퀄리티, 유난히 못 한 날 지적, 잘한 점)
-        3. **운동 수행 보고:** (루틴 수행 여부, 볼륨 변화)
-        4. **Next Week 전략:** (구체적인 개선 가이드)
+        영양사로서 식단을 분석하세요.
+        [프로필]: {profile_txt}
+        {SCORING_RULES}
+        [데이터]:
+        {chr(10).join(updates_needed)}
+        Output format (JSON List):
+        [ {{"row": 2, "total_input": "C:.. P:.. F:..", "score": 85, "comment": ".."}}, ... ]
         """
         
-        response = client_ai.models.generate_content(model="gemini-3-pro-preview", contents=prompt)
-        return response.text
-    except Exception as e: return f"리포트 생성 실패: {e}"
+        result = None
+        for model in MODEL_CANDIDATES:
+            try:
+                response = client_ai.models.generate_content(model=model, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
+                result = json.loads(response.text)
+                break
+            except: continue
+        
+        if not result: return "AI 응답 실패"
 
+        cnt = 0
+        for item in result:
+            ws.update_cell(item['row'], idx_total + 1, item['total_input'])
+            ws.update_cell(item['row'], idx_score + 1, item['score'])
+            ws.update_cell(item['row'], idx_comment + 1, item['comment'])
+            cnt += 1
+            time.sleep(0.5)
+        return f"{cnt}건 식단 업데이트 완료"
+    except Exception as e: return f"오류: {e}"
+
+# [기능 3] 통합로그 취합 (오늘 운동)
 def update_daily_summary():
-    """
-    [핵심 기능] 오늘 날짜의 각 시트(등, 가슴..) 기록을 긁어모아 '통합로그'에 저장
-    """
     today = datetime.datetime.now().strftime("%Y-%m-%d")
     sheet_list = ["등", "가슴", "하체", "어깨", "이두", "삼두", "복근", "기타", "유산소"]
     
@@ -150,13 +262,10 @@ def update_daily_summary():
         for sheet in sheet_list:
             ws = spreadsheet.worksheet(sheet)
             rows = ws.get_all_values()
-            # 날짜 컬럼(A열) 인덱스 = 0
-            # 해당 시트에서 오늘 날짜 기록 찾기
             today_rows = [r for r in rows[1:] if r[0] == today]
             
             if today_rows:
                 main_parts.append(sheet)
-                # 메인 운동은 첫 번째 기록된 운동으로 간주
                 if not main_exercises: main_exercises.append(today_rows[0][1])
                 
                 # 볼륨 합산 (유산소 제외)
@@ -170,105 +279,139 @@ def update_daily_summary():
         
         if not main_parts: return "오늘 기록된 운동이 없습니다."
 
-        # 통합로그 시트 업데이트
         summ_ws = spreadsheet.worksheet("통합로그")
-        # 헤더: 날짜, 타겟부위, 메인운동, 서브운동요약, 총볼륨, 피드백
-        
         parts_str = ", ".join(main_parts)
         main_ex_str = main_exercises[0] if main_exercises else ""
         sub_ex_str = f"{len(main_parts)}개 부위 수행"
         
-        # 기존에 오늘 날짜 행이 있는지 확인
         cell = summ_ws.find(today)
         row_data = [today, parts_str, main_ex_str, sub_ex_str, total_vol, ""]
         
         if cell:
-            # 업데이트
             for i, val in enumerate(row_data):
                 summ_ws.update_cell(cell.row, i+1, val)
-            return f"통합로그 업데이트 완료: {parts_str} (볼륨 {total_vol}kg)"
+            return f"업데이트 완료: {parts_str}"
         else:
-            # 신규 추가
             summ_ws.append_row(row_data)
-            return f"통합로그 생성 완료: {parts_str} (볼륨 {total_vol}kg)"
+            return f"신규 등록 완료: {parts_str}"
+    except Exception as e: return f"실패: {e}"
 
-    except Exception as e: return f"통합로그 취합 실패: {e}"
-
-def calculate_and_comment():
-    """운동 시트 계산 및 코멘트 작성 (이전 로직 강화판)"""
+# [기능 4] 주간 리포트 이메일
+def generate_and_send_report():
+    if not GMAIL_ID or not GMAIL_PW: return "❌ 이메일 설정이 없습니다."
+    
     try:
-        sheet_list = ["등", "가슴", "하체", "어깨", "이두", "삼두", "복근", "기타", "유산소"]
-        cnt = 0
-        for sheet in sheet_list:
-            ws = spreadsheet.worksheet(sheet)
-            rows = ws.get_all_values()
-            if len(rows) < 2: continue
-            header = rows[0]
-            
-            # 인덱스 찾기 (생략 - 이전 코드와 동일하게 안전하게 찾음)
-            try:
-                idx_note = next(i for i, h in enumerate(header) if "비고" in h)
-                # (나머지 인덱스 찾는 로직은 간결함을 위해 생략하되 실제 실행 시엔 필요)
-                idx_w = next(i for i, h in enumerate(header) if "무게" in h) if sheet != "유산소" else -1
-                idx_r = next(i for i, h in enumerate(header) if "횟수" in h) if sheet != "유산소" else -1
-                idx_set = next(i for i, h in enumerate(header) if "세트" in h)
-                idx_vol = next(i for i, h in enumerate(header) if "볼륨" in h) if sheet != "유산소" else -1
-            except: continue
+        diet_ws = spreadsheet.worksheet("식단")
+        log_ws = spreadsheet.worksheet("통합로그")
+        diet_data = diet_ws.get_all_values()[-7:]
+        log_data = log_ws.get_all_values()[-7:]
+        
+        prompt = f"""
+        트레이너로서 주간 보고서를 작성하세요.
+        [프로필]: {get_user_profile()}
+        [루틴]: {USER_ROUTINE}
+        [지난주 식단]: {diet_data}
+        [지난주 운동]: {log_data}
+        """
+        response = client_ai.models.generate_content(model="gemini-3-pro-preview", contents=prompt)
+        report_text = response.text
 
-            for i, row in enumerate(rows[1:], start=2):
-                # 1. 계산 로직 (콤마 처리 포함)
-                if sheet != "유산소":
-                    # ... (이전 코드의 콤마 분리 및 계산 로직 그대로 적용) ...
-                    # 지면 관계상 핵심 로직만: weights, reps 파싱 -> volume 계산 -> ws.update_cell
-                    pass 
+        msg = MIMEMultipart()
+        msg['From'] = GMAIL_ID
+        msg['To'] = GMAIL_ID
+        msg['Subject'] = f"[{datetime.datetime.now().strftime('%Y-%m-%d')}] 주간 운동 리포트"
+        msg.attach(MIMEText(report_text, 'plain'))
 
-                # 2. 코멘트 로직
-                note = row[idx_note] if len(row) > idx_note else ""
-                if not note:
-                    # AI에게 코멘트 요청
-                    # ...
-                    cnt += 1
-        return f"전체 시트 계산 및 코멘트 작성 완료 ({cnt}건)"
-    except: return "계산 로직 수행 중" # 실제 구현시엔 위 calculate_past_workout_stats 내용 전체 포함
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(GMAIL_ID, GMAIL_PW)
+        server.sendmail(GMAIL_ID, GMAIL_ID, msg.as_string())
+        server.quit()
+        return "📧 이메일 발송 성공!"
+    except Exception as e: return f"전송 실패: {e}"
 
 # ==========================================
-# 4. 메인 UI
+# 4. 메인 UI 및 채팅 로직
 # ==========================================
 st.title("Google Workout")
 
 with st.sidebar:
     st.header("Workout Log")
-    st.markdown(f"**[오늘의 루틴]**\n{USER_ROUTINE}")
+    st.markdown(USER_ROUTINE)
     
-    if st.button("🔄 통합로그 취합 (오늘 운동)"):
-        with st.spinner("각 시트에서 운동을 모으는 중..."):
-            st.success(update_daily_summary())
-            
-    if st.button("📧 주간 리포트 발송"):
-        with st.spinner("데이터 분석 및 메일 전송 중..."):
-            report = generate_weekly_report()
-            res = send_email_report(report)
-            st.info(report) # 화면에도 보여줌
-            st.success(res)
+    if st.button("🏋️ 운동 계산 & 코멘트"):
+        with st.spinner("계산 중..."): st.success(calculate_past_workout_stats())
 
     if st.button("🥗 식단 빈칸 계산"):
-        # (이전과 동일한 식단 채우기 로직)
-        pass
+        with st.spinner("분석 중..."): st.success(fill_past_diet_blanks(get_user_profile()))
 
-# 채팅 로직
+    if st.button("🔄 통합로그 취합 (오늘)"):
+        with st.spinner("취합 중..."): st.success(update_daily_summary())
+
+    if st.button("📧 주간 리포트 발송"):
+        with st.spinner("작성 중..."): st.success(generate_and_send_report())
+
 if "messages" not in st.session_state: st.session_state.messages = []
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
 uploaded_file = st.file_uploader("📸 사진 분석", type=['png', 'jpg', 'jpeg'])
 
-if prompt := st.chat_input("기록할 내용을 입력하세요..."):
-    # ... (유저 입력 처리) ...
-    # ... (AI 호출 및 JSON 파싱) ...
-    
-    # 🔴 [Fix] 리스트/딕셔너리 에러 해결
-    # result = json.loads(response.text)
-    # data_list = result['data'] if isinstance(result.get('data'), list) else [result.get('data')]
-    # 위와 같이 처리하여 리스트가 와도 for문으로 돌릴 수 있게 수정함.
-    
-    pass
+if prompt := st.chat_input("입력하세요..."):
+    # 유저 입력 UI 표시
+    if uploaded_file:
+        img = Image.open(uploaded_file)
+        st.chat_message("user").image(img, width=200)
+        st.session_state.messages.append({"role": "user", "content": "[사진]"})
+    else:
+        st.chat_message("user").markdown(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
+
+    with st.spinner("AI 처리 중..."):
+        profile_txt = get_user_profile()
+        contents = ["Profile:\n" + profile_txt + "\n\n" + SCORING_RULES + "\n" + JSON_GUIDE + "\nInput: " + prompt]
+        if uploaded_file: contents.append(img)
+
+        result = None
+        for model in MODEL_CANDIDATES:
+            try:
+                response = client_ai.models.generate_content(model=model, contents=contents, config=types.GenerateContentConfig(response_mime_type="application/json"))
+                result = json.loads(response.text)
+                break
+            except: continue
+
+        reply = ""
+        if not result: reply = "❌ 응답 실패 (API 키 확인)"
+        else:
+            try:
+                # [핵심 수정] 리스트/딕셔너리 호환 처리
+                if result.get('type') == 'chat': 
+                    reply = result.get('response')
+                
+                elif result.get('type') == 'diet':
+                    ws = spreadsheet.worksheet("식단")
+                    today = datetime.datetime.now().strftime("%Y-%m-%d")
+                    
+                    raw_data = result['data']
+                    data_list = raw_data if isinstance(raw_data, list) else [raw_data]
+                    
+                    for d in data_list:
+                        ws.append_row([today, d.get('breakfast'), d.get('lunch'), d.get('snack'), d.get('dinner'), d.get('supplement'), d.get('total_input'), d.get('score'), d.get('comment')])
+                    
+                    reply = f"🥗 식단 기록 완료. (점수: {data_list[0].get('score')})"
+
+                elif result.get('type') == 'workout':
+                    cnt = 0
+                    for d in result.get('details', []):
+                        ws = spreadsheet.worksheet(d.get('target_sheet'))
+                        today = datetime.datetime.now().strftime("%Y-%m-%d")
+                        if d.get('target_sheet') == "유산소":
+                            ws.append_row([today, d.get('exercise'), d.get('sets'), d.get('weight'), d.get('note')])
+                        else:
+                            ws.append_row([today, d.get('exercise'), d.get('sets'), d.get('weight'), d.get('reps'), d.get('onerm'), d.get('volume'), d.get('note')])
+                        cnt += 1
+                    reply = f"🏋️ {cnt}건 운동 기록 완료."
+            except Exception as e: reply = f"저장 중 오류: {e}"
+
+        st.chat_message("assistant").markdown(reply)
+        st.session_state.messages.append({"role": "assistant", "content": reply})
