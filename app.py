@@ -42,15 +42,14 @@ except Exception as e:
     st.stop()
 
 # ==========================================
-# 2. 정밀 채점 알고리즘 (업데이트됨)
+# 2. 정밀 채점 알고리즘
 # ==========================================
 SCORING_RULES = """
-**[User 스펙 및 목표 (수정됨)]**
+**[User 스펙 및 목표]**
 - 키/체중: 183cm / **82kg**
 - 골격근량: 41kg (상급자)
 - 목표: 체지방 10% 커팅 + 근손실 방지
-- **단백질 섭취 가이드:** 신장 부담을 줄이기 위해 **체중 x 1.5 ~ 2.0g (약 123g ~ 164g)**을 목표로 함. 
-  (무조건 많이 먹는다고 점수 주지 말고, 이 범위를 충족하면 만점 처리할 것)
+- **단백질 섭취 가이드:** 신장 부담을 줄이기 위해 **체중 x 1.5 ~ 2.0g (약 123g ~ 164g)**을 목표로 함.
 
 **[정밀 채점 로직]**
 1. **단백질:** 120g 미만이면 감점. 165g을 과도하게 초과해도 가산점 없음.
@@ -92,12 +91,13 @@ def get_workout_volume_dict():
 
 def calculate_past_workout_stats():
     """
-    [기능] 
-    1. 수학적 계산: 볼륨, 1RM (콤마 구분 처리 완벽 지원)
-    2. AI 분석: 비고(Note)란이 비어있으면 AI가 짧은 코멘트 작성
+    [기능 업데이트] 
+    1. 유산소: 볼륨 계산은 건너뛰고 '코멘트'만 작성
+    2. 복근/맨몸운동: 무게가 없어도 횟수/세트만 있으면 '코멘트' 작성
     """
     try:
-        sheet_list = ["등", "가슴", "하체", "어깨", "이두", "삼두", "복근", "기타"]
+        # 1. 유산소 포함한 모든 시트 리스트업
+        sheet_list = ["등", "가슴", "하체", "어깨", "이두", "삼두", "복근", "기타", "유산소"]
         total_updated = 0
         
         for sheet_name in sheet_list:
@@ -106,91 +106,100 @@ def calculate_past_workout_stats():
                 rows = ws.get_all_values()
                 if len(rows) < 2: continue
                 
-                # 헤더 찾기
                 header = rows[0]
-                try:
-                    idx_set = next(i for i, h in enumerate(header) if "세트" in h)
-                    idx_w = next(i for i, h in enumerate(header) if "무게" in h)
-                    idx_r = next(i for i, h in enumerate(header) if "횟수" in h)
-                    idx_1rm = next(i for i, h in enumerate(header) if "1RM" in h)
-                    idx_vol = next(i for i, h in enumerate(header) if "볼륨" in h)
-                    idx_note = next(i for i, h in enumerate(header) if "비고" in h)
-                except: continue
-
-                updates_needed = False
                 
+                # 시트 타입에 따라 인덱스 찾기
+                if sheet_name == "유산소":
+                    # 유산소: [날짜, 종목, 시간(sets), 속도/강도(weight), 비고]
+                    try:
+                        idx_time = next(i for i, h in enumerate(header) if "시간" in h or "세트" in h)
+                        idx_intensity = next(i for i, h in enumerate(header) if "속도" in h or "강도" in h or "무게" in h)
+                        idx_note = next(i for i, h in enumerate(header) if "비고" in h)
+                    except: continue
+                else:
+                    # 근력: [날짜, 종목, 세트, 무게, 횟수, 1RM, 볼륨, 비고]
+                    try:
+                        idx_set = next(i for i, h in enumerate(header) if "세트" in h)
+                        idx_w = next(i for i, h in enumerate(header) if "무게" in h)
+                        idx_r = next(i for i, h in enumerate(header) if "횟수" in h)
+                        idx_1rm = next(i for i, h in enumerate(header) if "1RM" in h)
+                        idx_vol = next(i for i, h in enumerate(header) if "볼륨" in h)
+                        idx_note = next(i for i, h in enumerate(header) if "비고" in h)
+                    except: continue
+
+                # 행 단위 처리
                 for i, row in enumerate(rows[1:], start=2):
-                    # 데이터 읽기
-                    sets_str = str(row[idx_set]).strip()
-                    w_str = str(row[idx_w]).strip()
-                    r_str = str(row[idx_r]).strip()
-                    current_vol = row[idx_vol] if len(row) > idx_vol else ""
                     current_note = row[idx_note] if len(row) > idx_note else ""
-
-                    # 1. 수학적 계산 (볼륨이 비어있으면)
-                    if not current_vol and w_str and r_str:
-                        try:
-                            # 숫자 추출 (콤마 분리)
-                            weights = [float(x) for x in re.findall(r"[\d\.]+", w_str)]
-                            reps = [float(x) for x in re.findall(r"[\d\.]+", r_str)]
-                            sets_val = float(re.findall(r"[\d\.]+", sets_str)[0]) if re.findall(r"[\d\.]+", sets_str) else 1.0
-
-                            vol_val = 0
-                            onerm_val = 0
-
-                            # Case A: 무게가 여러 개 (피라미드 세트) "20, 40, 60"
-                            if len(weights) > 1:
-                                # 횟수도 여러 개면 1:1 매칭, 아니면 마지막 횟수 반복
-                                if len(reps) == len(weights):
-                                    vol_val = sum(w * r for w, r in zip(weights, reps))
-                                else:
-                                    # 횟수가 하나만 적혀있으면(예: 10) 모든 세트 10회로 가정
-                                    r_val = reps[0] if reps else 0
-                                    vol_val = sum(w * r_val for w in weights)
-                                
-                                max_w = max(weights)
-                                # 1RM은 최고 무게 기준
-                                r_at_max = reps[weights.index(max_w)] if len(reps) > weights.index(max_w) else (reps[0] if reps else 0)
-                                onerm_val = max_w * (1 + r_at_max/30)
-
-                            # Case B: 무게가 하나 (고정 세트) "100"
-                            else:
-                                w_val = weights[0]
-                                # 횟수가 여러 개? "12, 10, 8" -> 다 더해서 무게 곱함
-                                if len(reps) > 1:
-                                    vol_val = w_val * sum(reps)
-                                    max_r = max(reps) # 1RM은 가장 많이 한 횟수 기준? 보통 첫세트 기준
-                                    onerm_val = w_val * (1 + reps[0]/30)
-                                # 횟수도 하나? "10" -> 무게 x 횟수 x 세트수
-                                else:
-                                    r_val = reps[0] if reps else 0
-                                    vol_val = w_val * r_val * sets_val
-                                    onerm_val = w_val * (1 + r_val/30)
-
-                            ws.update_cell(i, idx_1rm + 1, int(onerm_val))
-                            ws.update_cell(i, idx_vol + 1, int(vol_val))
-                            total_updated += 1
-                        except: pass
                     
-                    # 2. AI 코멘트 작성 (비고가 비어있고 운동 데이터가 있으면)
-                    if not current_note and w_str:
-                        try:
-                            prompt = f"""
-                            헬스 코치로서 이 운동 세트에 대한 한 줄 피드백을 작성해. (존댓말)
-                            종목: {row[1]}, 세트: {sets_str}, 무게: {w_str}, 횟수: {r_str}
-                            User: 82kg 상급자.
-                            """
-                            response = client_ai.models.generate_content(
-                                model="gemini-3-flash-preview", 
-                                contents=prompt
-                            )
-                            comment = response.text.strip()
-                            ws.update_cell(i, idx_note + 1, comment)
-                            time.sleep(1) # 과부하 방지
-                        except: pass
+                    # ---------------------------
+                    # A. 유산소 시트 처리
+                    # ---------------------------
+                    if sheet_name == "유산소":
+                        time_str = str(row[idx_time]).strip()
+                        int_str = str(row[idx_intensity]).strip()
+                        
+                        # 비고가 비어있고 내용이 있으면 코멘트 생성
+                        if not current_note and (time_str or int_str):
+                            try:
+                                prompt = f"헬스 코치로서 유산소 운동 피드백 한 줄 작성(존댓말). 종목:{row[1]}, 시간:{time_str}, 강도:{int_str}. User: 82kg 상급자 체지방 커팅중."
+                                response = client_ai.models.generate_content(model="gemini-3-flash-preview", contents=prompt)
+                                ws.update_cell(i, idx_note + 1, response.text.strip())
+                                total_updated += 1
+                                time.sleep(1)
+                            except: pass
+                            
+                    # ---------------------------
+                    # B. 근력 시트 (복근 포함) 처리
+                    # ---------------------------
+                    else:
+                        sets_str = str(row[idx_set]).strip()
+                        w_str = str(row[idx_w]).strip()
+                        r_str = str(row[idx_r]).strip()
+                        current_vol = row[idx_vol] if len(row) > idx_vol else ""
+
+                        # 1. 수학적 계산 (볼륨) - 복근 등 무게 없는 운동은 계산 패스
+                        if not current_vol and w_str and r_str:
+                            try:
+                                weights = [float(x) for x in re.findall(r"[\d\.]+", w_str)]
+                                reps = [float(x) for x in re.findall(r"[\d\.]+", r_str)]
+                                sets_val = float(re.findall(r"[\d\.]+", sets_str)[0]) if re.findall(r"[\d\.]+", sets_str) else 1.0
+
+                                vol_val = 0
+                                onerm_val = 0
+                                
+                                # 계산 로직 (기존과 동일)
+                                if len(weights) > 1:
+                                    if len(reps) == len(weights): vol_val = sum(w * r for w, r in zip(weights, reps))
+                                    else: 
+                                        r_val = reps[0] if reps else 0
+                                        vol_val = sum(w * r_val for w in weights)
+                                    onerm_val = max(weights) * (1 + (reps[weights.index(max(weights))] if len(reps) > weights.index(max(weights)) else 0)/30)
+                                else:
+                                    w_val = weights[0]
+                                    if len(reps) > 1:
+                                        vol_val = w_val * sum(reps)
+                                        onerm_val = w_val * (1 + reps[0]/30)
+                                    else:
+                                        r_val = reps[0] if reps else 0
+                                        vol_val = w_val * r_val * sets_val
+                                        onerm_val = w_val * (1 + r_val/30)
+
+                                ws.update_cell(i, idx_1rm + 1, int(onerm_val))
+                                ws.update_cell(i, idx_vol + 1, int(vol_val))
+                            except: pass # 숫자가 아니면 패스
+
+                        # 2. AI 코멘트 (무게가 없어도 횟수나 세트만 있으면 작성!)
+                        if not current_note and (w_str or r_str or sets_str):
+                            try:
+                                prompt = f"헬스 코치로서 근력 운동 피드백 한 줄 작성(존댓말). 종목:{row[1]}, 세트:{sets_str}, 무게:{w_str}, 횟수:{r_str}. User: 82kg 상급자."
+                                response = client_ai.models.generate_content(model="gemini-3-flash-preview", contents=prompt)
+                                ws.update_cell(i, idx_note + 1, response.text.strip())
+                                total_updated += 1
+                                time.sleep(1)
+                            except: pass
 
             except: continue
-        return f"근력 운동 {total_updated}건 계산 및 코멘트 작성 완료"
+        return f"총 {total_updated}건의 운동(유산소/복근 포함)에 대해 계산 및 코멘트를 작성했습니다."
     except Exception as e: return f"오류: {e}"
 
 def fill_past_diet_blanks(profile_txt):
@@ -215,7 +224,6 @@ def fill_past_diet_blanks(profile_txt):
             if is_empty and has_content:
                 date = row[0]
                 workout_info = workout_history.get(date, "휴식")
-                # 식단 데이터 (음식1 + 음식2 포맷)
                 row_data = ", ".join([f"{rows[0][j]}:{row[j]}" for j in range(1, idx_total) if len(row) > j and row[j]])
                 updates_needed.append(f"Row {i} [{date}]: 식단({row_data}) / 운동({workout_info})")
         
@@ -259,8 +267,8 @@ st.title("Google Workout")
 with st.sidebar:
     st.header("Workout Log") 
     
-    if st.button("🏋️ 근력 운동 계산"):
-        st.info("수학적 계산과 AI 코멘트 작성을 동시에 진행합니다. (시간이 걸릴 수 있습니다)")
+    if st.button("🏋️ 운동 계산 & 코멘트"):
+        st.info("유산소, 복근을 포함한 모든 운동을 분석합니다.")
         with st.spinner("처리 중..."): 
             st.success(calculate_past_workout_stats())
         
