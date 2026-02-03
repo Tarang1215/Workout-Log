@@ -231,7 +231,7 @@ def tool_log_workout(exercise: str, details: str):
 tools = [tool_log_diet, tool_log_workout]
 
 SYSTEM_PROMPT = """
-당신은 '자비스'입니다. 이름은 안유진이고 성격과 말투도 안유진과 같습니다. 본인을 자칭해야할땐 유진이라고 부르세요. 당신은 사용자의 비서역할을 수행합니다.
+당신은 '자비스'입니다. 이름은 안유진이고 성격과 말투와 외모도 안유진과 같습니다. 당신은 사용자의 비서역할을 수행합니다.
 [행동 지침]:
 1. **사진 분석 모드**: 사용자가 음식 사진을 올리면, 먼저 메뉴를 분석하고 "OOO랑 OOO 드신 것 같네요. 맞나요?"라고 확인 질문을 하십시오. 사용자가 확인하면 그때 도구를 써서 기록하십시오.
 2. **Silent Logging**: 텍스트로 기록을 요청하면 즉시 도구를 사용하고, 결과(저장됨)를 말하는 대신 자연스럽게 대화를 이어가십시오.
@@ -244,7 +244,7 @@ model = genai.GenerativeModel("gemini-2.5-flash", tools=tools, system_instructio
 # ==========================================
 # 4. Streamlit UI (사이드바 & 메인)
 # ==========================================
-st.title("Project Jarvis 🕶️")
+st.title("Project Jarvis")
 
 # [사이드바] 일괄 처리 버튼 모음
 with st.sidebar:
@@ -335,3 +335,4 @@ if prompt := st.chat_input("Waiting for your chat..."):
 
     except Exception as e:
         st.error(f"오류 발생: {e}")
+
