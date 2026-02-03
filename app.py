@@ -10,6 +10,7 @@ from PIL import Image
 import re
 import time
 import smtplib
+import streamlit as st
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -20,8 +21,8 @@ st.set_page_config(page_title="Google Workout", page_icon="💪", layout="wide")
 SHEET_NAME = "운동일지_DB"
 
 USER_ROUTINE = """
-**[매니저님 루틴]**
-- 화: 가슴 / 수: 등 / 목: 어깨 / 금: 휴식 / 토: 하체 / 일: 팔, 복근, 인터벌 / 월: 휴식
+**[Routine]**
+- 월: 휴식 / 화: 가슴 / 수: 등 / 목: 어깨 / 금: 휴식 / 토: 하체 / 일: 팔, 복근, 인터벌
 """
 
 MODEL_CANDIDATES = [
@@ -75,7 +76,41 @@ JSON_GUIDE = """
    
 3. **단순 대화:** { "type": "chat", "response": "..." }
 """
+# 현재 시간 및 요일 정보 가져오기
+now = datetime.datetime.now()
+weekday_map = ["월", "화", "수", "목", "금", "토", "일"]
+today_str = now.strftime("%Y-%m-%d")
+today_weekday = weekday_map[now.weekday()]
 
+# 최근 운동 기록 요약 가져오기 (지능형 제안을 위해)
+def get_recent_workout_summary():
+    try:
+        ws = spreadsheet.worksheet("통합로그")
+        # 마지막 3일치 기록 가져오기
+        recent_rows = ws.get_all_values()[-3:]
+        return str(recent_rows)
+    except:
+        return "최근 기록 없음"
+
+# 자비스 전용 시스템 프롬프트 구성
+def get_jarvis_system_prompt():
+    recent_logs = get_recent_workout_summary()
+    profile = get_user_profile()
+    
+    return f"""
+너는 유능하고 위트 있는 개인 비서 '자비스'다. 
+[사용자 정보]: {profile}
+[기본 루틴]: {USER_ROUTINE}
+[현재 시간]: {today_str} ({today_weekday}요일)
+[최근 운동 기록]: {recent_logs}
+
+[행동 지침]:
+1. 대화를 우선시하라. 사용자가 "저녁에 뭐 먹을까?"라고 물으면 식단 시트에 바로 적지 말고 메뉴를 추천하며 대화하라.
+2. 사용자가 "먹었어", "했어", "기록해줘"라고 명확히 말할 때만 JSON의 type을 'diet'나 'workout'으로 출력하라.
+3. **지능적 제안**: 최근 기록을 보고 원래 루틴과 다르면 언급하라. 
+   - 예: 어제 루틴이 '가슴'인데 기록이 없다면, "어제 가슴 운동을 못 하신 것 같은데, 오늘 가슴 운동을 진행할까요?"라고 먼저 물어봐라.
+4. 말투는 정중하면서도 친근한 존댓말을 사용하라.
+"""
 # ==========================================
 # 3. 핵심 함수들 (전체 복구됨)
 # ==========================================
@@ -434,3 +469,4 @@ if prompt := st.chat_input("입력하세요..."):
 
         st.chat_message("assistant").markdown(reply)
         st.session_state.messages.append({"role": "assistant", "content": reply})
+
