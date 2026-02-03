@@ -6,74 +6,76 @@ from oauth2client.service_account import ServiceAccountCredentials
 import datetime
 import json
 import time
+import re
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from PIL import Image
 
 # ==========================================
-# 1. 환경 설정 및 비밀키 로드
+# 1. 환경 설정 및 초기화
 # ==========================================
-st.set_page_config(page_title="Project Jarvis", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Project Jarvis", page_icon="🕶️", layout="wide")
 
-# Streamlit Secrets에서 설정 로드
+# CSS로 토스트 메시지 스타일링 및 팝오버 조정
+st.markdown("""
+<style>
+    .stToast { background-color: #333; color: white; border-radius: 10px; }
+</style>
+""", unsafe_allow_html=True)
+
+# Secrets 로드
 try:
     if "GEMINI_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         
-        # 구글 시트 인증
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client_sheet = gspread.authorize(creds)
+        spreadsheet = client_sheet.open("운동일지_DB") # 시트 이름 정확히 확인!
         
-        # 시트 이름 설정
-        SHEET_NAME = "운동일지_DB" # 기존 시트 이름 유지
-        spreadsheet = client_sheet.open(SHEET_NAME)
+        GMAIL_ID = st.secrets.get("GMAIL_ID")
+        GMAIL_PW = st.secrets.get("GMAIL_APP_PW")
     else:
-        st.error("❌ Secrets 설정이 필요합니다. (.streamlit/secrets.toml 확인)")
+        st.error("❌ Secrets 설정이 필요합니다.")
         st.stop()
 except Exception as e:
     st.error(f"❌ 초기화 오류: {e}")
     st.stop()
 
 # ==========================================
-# 2. DB 핸들러 (구글 시트 연동)
+# 2. Jarvis Backend (기능 처리 엔진)
 # ==========================================
-class JarvisDatabase:
-    def __init__(self, spreadsheet):
-        self.doc = spreadsheet
+class JarvisBackend:
+    def __init__(self, doc):
+        self.doc = doc
 
+    # [Tool 1] 식단 기록
     def log_diet(self, menu: str, amount: str, meal_type: str):
-        """식단을 구글 시트에 기록합니다."""
         try:
             ws = self.doc.worksheet("식단")
             today = datetime.datetime.now().strftime("%Y-%m-%d")
-            
-            # 식단 시트 컬럼 매핑 (User의 시트 구조에 맞춤)
-            # 가정: 날짜(A), 아침(B), 점심(C), 간식(D), 저녁(E), 보충제(F)
             col_map = {"아침": 2, "점심": 3, "간식": 4, "저녁": 5, "보충제": 6}
-            target_col = col_map.get(meal_type, 4) # 기본값은 간식
+            target_col = col_map.get(meal_type, 4)
             
-            # 오늘 날짜 행 찾기 또는 생성
             cell = ws.find(today)
-            input_text = f"{menu} ({amount})"
+            input_text = f"{menu}({amount})"
             
             if cell:
-                # 기존 데이터가 있으면 이어쓰기
                 existing = ws.cell(cell.row, target_col).value
                 new_val = f"{existing}, {input_text}" if existing else input_text
                 ws.update_cell(cell.row, target_col, new_val)
             else:
-                # 새 행 추가
                 row_data = [today, "", "", "", "", "", ""]
                 row_data[target_col-1] = input_text
                 ws.append_row(row_data)
-                
             return "success"
-        except Exception as e:
-            return f"error: {str(e)}"
+        except Exception as e: return f"error: {e}"
 
-    def log_workout(self, exercise: str, log_details: str):
-        """운동을 구글 시트에 기록합니다."""
+    # [Tool 2] 운동 기록
+    def log_workout(self, exercise: str, details: str):
         try:
-            # 운동 종목에 따라 시트 분류 (간소화된 로직)
             target_sheet = "기타"
             if any(x in exercise for x in ["벤치", "가슴", "푸시업"]): target_sheet = "가슴"
             elif any(x in exercise for x in ["로우", "풀업", "등"]): target_sheet = "등"
@@ -82,146 +84,254 @@ class JarvisDatabase:
             
             ws = self.doc.worksheet(target_sheet)
             today = datetime.datetime.now().strftime("%Y-%m-%d")
-            
-            # [날짜, 종목, 내용] 형태로 단순 저장 (추후 상세화 가능)
-            ws.append_row([today, exercise, log_details])
+            ws.append_row([today, exercise, details])
             return "success"
-        except Exception as e:
-            return f"error: {str(e)}"
+        except Exception as e: return f"error: {e}"
 
-db = JarvisDatabase(spreadsheet)
+    # [Batch 1] 운동 통계 일괄 계산 (1RM, 볼륨, AI코멘트)
+    def batch_calculate_stats(self):
+        sheet_list = ["등", "가슴", "하체", "어깨", "이두", "삼두", "복근"]
+        count = 0
+        log_txt = []
+        
+        for sheet_name in sheet_list:
+            try:
+                ws = self.doc.worksheet(sheet_name)
+                rows = ws.get_all_values()
+                if len(rows) < 2: continue
+                
+                header = rows[0]
+                try:
+                    idx_w = next(i for i, h in enumerate(header) if "무게" in h)
+                    idx_r = next(i for i, h in enumerate(header) if "횟수" in h)
+                    idx_vol = next(i for i, h in enumerate(header) if "볼륨" in h)
+                    idx_1rm = next(i for i, h in enumerate(header) if "1RM" in h)
+                    idx_note = next(i for i, h in enumerate(header) if "비고" in h)
+                except: continue
+
+                for i, row in enumerate(rows[1:], start=2):
+                    # 볼륨이 비어있고 무게/횟수가 있으면 계산 대상
+                    if (len(row) <= idx_vol or not row[idx_vol]) and row[idx_w] and row[idx_r]:
+                        w_str = row[idx_w]
+                        r_str = row[idx_r]
+                        weights = [float(x) for x in re.findall(r"[\d\.]+", w_str)]
+                        reps = [float(x) for x in re.findall(r"[\d\.]+", r_str)]
+                        
+                        if weights and reps:
+                            max_w = max(weights)
+                            max_r = reps[0] if reps else 0
+                            
+                            # 1RM & 볼륨 계산
+                            one_rm = int(max_w * (1 + max_r/30))
+                            vol = int(max_w * sum(reps)) if len(weights) == 1 else int(sum(w*r for w,r in zip(weights, reps)) if len(weights)==len(reps) else max_w * sum(reps))
+                            
+                            ws.update_cell(i, idx_vol+1, vol)
+                            ws.update_cell(i, idx_1rm+1, one_rm)
+                            
+                            # AI 코멘트 (비어있으면)
+                            current_note = row[idx_note] if len(row) > idx_note else ""
+                            if not current_note:
+                                prompt = f"헬스 트레이너로서 짧고 굵은 피드백(반말). 종목:{row[1]}, 무게:{w_str}, 횟수:{r_str}, 1RM:{one_rm}."
+                                model_flash = genai.GenerativeModel("gemini-2.5-flash") # 빠른 모델 사용
+                                res = model_flash.generate_content(prompt)
+                                ws.update_cell(i, idx_note+1, res.text.strip())
+                            
+                            count += 1
+                            log_txt.append(f"{sheet_name}: {row[1]} 업데이트 완료")
+                            time.sleep(0.8) # API 제한 방지
+            except: continue
+        return f"✅ 총 {count}건 업데이트 완료!"
+
+    # [Batch 2] 식단 일괄 채점
+    def batch_score_diet(self):
+        try:
+            ws = self.doc.worksheet("식단")
+            rows = ws.get_all_values()
+            idx_total = next(i for i, h in enumerate(rows[0]) if "Total" in h)
+            idx_score = next(i for i, h in enumerate(rows[0]) if "Score" in h)
+            idx_cmt = 8
+            
+            updates = []
+            for i, row in enumerate(rows[1:], start=2):
+                has_food = any(row[j] for j in range(1, idx_total) if len(row) > j and row[j])
+                is_empty_score = (len(row) <= idx_score) or (not row[idx_score])
+                
+                if has_food and is_empty_score:
+                    diet_str = f"아침:{row[1]}, 점심:{row[2]}, 저녁:{row[4]}, 간식:{row[3]}"
+                    updates.append((i, diet_str))
+            
+            if not updates: return "채점할 데이터가 없습니다."
+
+            count = 0
+            model_flash = genai.GenerativeModel("gemini-2.5-flash")
+            for row_idx, diet_str in updates:
+                prompt = f"""
+                영양사로서 평가해줘. User: 183cm/82kg/골격근41kg (커팅중).
+                식단: {diet_str}
+                Output JSON: {{ "total": "C:.. P:.. F:..", "score": 85, "comment": "한줄평" }}
+                """
+                try:
+                    res = model_flash.generate_content(prompt)
+                    txt = res.text.strip().replace("```json", "").replace("```", "")
+                    data = json.loads(txt)
+                    
+                    ws.update_cell(row_idx, idx_total+1, data.get("total", "-"))
+                    ws.update_cell(row_idx, idx_score+1, data.get("score", 0))
+                    ws.update_cell(row_idx, idx_cmt+1, data.get("comment", "-"))
+                    count += 1
+                    time.sleep(1)
+                except: continue
+            return f"✅ {count}일치 식단 채점 완료"
+        except Exception as e: return f"오류: {e}"
+
+    # [Batch 3] 주간 리포트 발송
+    def send_report(self):
+        if not GMAIL_ID: return "❌ 이메일 설정 필요"
+        try:
+            ws = self.doc.worksheet("통합로그")
+            logs = ws.get_all_values()[-7:]
+            model_pro = genai.GenerativeModel("gemini-3-flash-preview")
+            
+            prompt = f"자비스로서 사용자의 지난주 운동/식단 요약 보고서를 작성해. 데이터: {logs}. 정중하고 분석적으로."
+            res = model_pro.generate_content(prompt)
+            
+            msg = MIMEMultipart()
+            msg['From'] = GMAIL_ID
+            msg['To'] = GMAIL_ID
+            msg['Subject'] = f"[Jarvis] 주간 리포트 ({datetime.datetime.now().strftime('%Y-%m-%d')})"
+            msg.attach(MIMEText(res.text, 'plain'))
+            
+            server = smtplib.SMTP('smtp.gmail.com', 587)
+            server.starttls()
+            server.login(GMAIL_ID, GMAIL_PW)
+            server.sendmail(GMAIL_ID, GMAIL_ID, msg.as_string())
+            server.quit()
+            return "📧 리포트 발송 완료!"
+        except Exception as e: return f"전송 실패: {e}"
+
+backend = JarvisBackend(spreadsheet)
 
 # ==========================================
-# 3. Gemini 도구(Tool) 정의
+# 3. Gemini Tools & System Prompt
 # ==========================================
-# Gemini가 인식할 수 있는 함수 래퍼
-def tool_log_diet(menu: str, amount: str = "적당량", meal_type: str = "간식"):
-    """
-    사용자가 먹은 음식을 기록할 때 사용합니다.
-    Args:
-        menu: 음식 이름 (예: 치즈케이크, 닭가슴살)
-        amount: 먹은 양 (예: 1조각, 200g)
-        meal_type: 식사 종류 (아침, 점심, 저녁, 간식, 보충제 중 하나)
-    """
-    result = db.log_diet(menu, amount, meal_type)
-    if result == "success":
-        # ⭐ 핵심: 여기서 Toast 알림을 띄웁니다!
-        st.toast(f"🥗 식단 기록 완료: {menu} ({amount})", icon="✅")
-        return {"status": "success", "msg": "식단이 데이터베이스에 저장되었습니다."}
-    else:
-        return {"status": "error", "msg": result}
+def tool_log_diet(menu: str, amount: str = "1인분", meal_type: str = "간식"):
+    """식단을 기록합니다. 식사 메뉴와 양, 종류(아침/점심/저녁/간식)를 받습니다."""
+    res = backend.log_diet(menu, amount, meal_type)
+    if res == "success":
+        st.toast(f"🥗 기록 완료: {menu}", icon="✅")
+        return "데이터베이스 저장 완료."
+    return "저장 실패"
 
 def tool_log_workout(exercise: str, details: str):
-    """
-    사용자가 수행한 운동을 기록할 때 사용합니다.
-    Args:
-        exercise: 운동 이름 (예: 벤치프레스, 러닝)
-        details: 세트, 무게, 횟수 등 상세 내용 (예: 100kg 5회 5세트)
-    """
-    result = db.log_workout(exercise, details)
-    if result == "success":
-        # ⭐ 핵심: 여기서 Toast 알림을 띄웁니다!
-        st.toast(f"💪 운동 기록 완료: {exercise}", icon="🔥")
-        return {"status": "success", "msg": "운동이 데이터베이스에 저장되었습니다."}
-    else:
-        return {"status": "error", "msg": result}
+    """운동을 기록합니다. 종목명과 상세내용(무게, 횟수 등)을 받습니다."""
+    res = backend.log_workout(exercise, details)
+    if res == "success":
+        st.toast(f"💪 기록 완료: {exercise}", icon="🔥")
+        return "데이터베이스 저장 완료."
+    return "저장 실패"
 
-# 도구 딕셔너리 (실제 실행용)
-tools_map = {
-    "tool_log_diet": tool_log_diet,
-    "tool_log_workout": tool_log_workout
-}
+tools = [tool_log_diet, tool_log_workout]
 
-# ==========================================
-# 4. 시스템 프롬프트 및 모델 초기화
-# ==========================================
-SYSTEM_INSTRUCTION = """
-당신은 'Project Jarvis'의 AI 비서입니다. 사용자는 펀드매니저이며, 2년 내 1억 모으기가 목표입니다.
-당신의 역할은 사용자의 완벽한 파트너가 되는 것입니다.
-
-[핵심 행동 강령]:
-1. **페르소나**: 유능하고, 위트 있고, 공감 능력이 뛰어납니다. 딱딱한 기계처럼 굴지 마십시오.
-2. **도구 사용 (Silent Logging)**: 
-   - 사용자가 식단이나 운동 정보를 말하면, 즉시 제공된 도구(`tool_log_diet`, `tool_log_workout`)를 사용하여 기록하십시오.
-   - **중요**: 도구를 사용한 후, "기록했습니다"라고 말하지 마십시오. 사용자는 이미 화면 알림을 보았습니다.
-   - 대신, 대화의 맥락을 이어가십시오. (예: "치즈케이크 기록해줘" -> (기록 실행) -> "맛있었겠네요! 어느 카페 거에요?")
-3. **기록 확인**: 사용자가 명시적으로 "오늘 뭐 먹었지?"라고 물을 때만 기록된 내용을 읊어주십시오.
-
-[사용자 프로필]:
-- 직업: 펀드매니저 (금융/투자 이야기 환영)
-- 관심사: 바이오, 반도체, 의료AI, 헬스
+SYSTEM_PROMPT = """
+당신은 '자비스'입니다. 성격 및 말투는 안유진과 같습니다. 펀드매니저 사용자의 비서입니다.
+[행동 지침]:
+1. **사진 분석 모드**: 사용자가 음식 사진을 올리면, 먼저 메뉴를 분석하고 "OOO랑 OOO 드신 것 같네요. 맞나요?"라고 확인 질문을 하십시오. 사용자가 확인하면 그때 도구를 써서 기록하십시오.
+2. **Silent Logging**: 텍스트로 기록을 요청하면 즉시 도구를 사용하고, 결과(저장됨)를 말하는 대신 자연스럽게 대화를 이어가십시오.
+3. **톤앤매너**: 전문적이지만 부드럽고 위트 있게.
 """
 
-model = genai.GenerativeModel(
-    model_name="gemini-2.0-flash-exp", # 함수 호출 성능이 좋은 최신 모델 권장
-    tools=[tool_log_diet, tool_log_workout],
-    system_instruction=SYSTEM_INSTRUCTION
-)
+model = genai.GenerativeModel("gemini-2.0-flash-exp", tools=tools, system_instruction=SYSTEM_PROMPT)
 
 # ==========================================
-# 5. 채팅 인터페이스 (Main Loop)
+# 4. Streamlit UI (사이드바 & 메인)
 # ==========================================
+st.title("Project Jarvis 🕶️")
+
+# [사이드바] 일괄 처리 버튼 모음
+with st.sidebar:
+    st.header("🎛️ Control Center")
+    if st.button("🏋️ 지난 운동 계산 & 피드백"):
+        with st.spinner("계산 중..."): st.success(backend.batch_calculate_stats())
+    
+    if st.button("🥗 식단 빈칸 채점"):
+        with st.spinner("채점 중..."): st.success(backend.batch_score_diet())
+        
+    if st.button("📧 주간 리포트 발송"):
+        with st.spinner("작성 중..."): st.success(backend.send_report())
+    
+    st.divider()
+    st.caption("Developed by Jarvis Project Team")
+
+# [메인] 채팅 & 사진 입력
 if "messages" not in st.session_state:
     st.session_state.messages = []
-    
-# 채팅 히스토리 렌더링
+
+# 이전 대화 출력
 for msg in st.session_state.messages:
-    # Function Call 결과 메시지는 사용자에게 보여주지 않음 (깔끔한 UI)
     if msg["role"] != "function":
         with st.chat_message(msg["role"]):
+            if "image" in msg: st.image(msg["image"], width=250)
             st.markdown(msg["content"])
 
-# 채팅 처리 (Manual Tool Handling Pattern)
-if prompt := st.chat_input("자비스에게 말 걸기..."):
-    # 1. 사용자 입력 표시
-    st.chat_message("user").markdown(prompt)
-    st.session_state.messages.append({"role": "user", "content": prompt})
+# [UI 핵심] 사진 업로더를 팝오버로 숨김 (채팅창 바로 위)
+with st.popover("📸 사진 추가 / 분석", use_container_width=True):
+    uploaded_file = st.file_uploader("음식 또는 운동 사진을 올려주세요", type=['jpg', 'png', 'jpeg'])
 
-    # 2. Gemini 호출 (히스토리 포함)
+# 채팅 입력
+if prompt := st.chat_input("Waiting for your chat..."):
+    # 1. 유저 메시지 표시
+    with st.chat_message("user"):
+        if uploaded_file:
+            img = Image.open(uploaded_file)
+            st.image(img, width=250)
+            st.session_state.messages.append({"role": "user", "content": "[사진 제출]", "image": img})
+        st.markdown(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
+
+    # 2. AI 처리
     try:
-        # 히스토리 포맷 변환 (Gemini API 규격에 맞게)
-        chat_history = []
+        # 히스토리 구성
+        history_for_api = []
         for m in st.session_state.messages:
-             # role이 'function'인 것은 내부 처리용이라 제외하거나, 
-             # API에 맞게 변환해야 하는데, 여기서는 간단히 user/model만 필터링해서 컨텍스트로 줌
-             if m["role"] in ["user", "model"]:
-                 chat_history.append({"role": m["role"], "parts": [m["content"]]})
-        
-        chat = model.start_chat(history=chat_history)
-        response = chat.send_message(prompt)
-        
-        # 3. 함수 호출(Function Call) 처리 루프
-        # Gemini가 함수를 호출하고 싶으면 response.parts에 function_call이 들어있음
-        final_response_text = ""
-        
-        # 멀티턴 처리를 위해 while 루프 사용 (함수 호출 -> 결과 반환 -> 다시 모델 생성 -> 텍스트 나올 때까지)
+            if m["role"] == "user":
+                parts = [m["content"]]
+                if "image" in m: parts.append(m["image"]) # 이미지 객체 전달
+                history_for_api.append({"role": "user", "parts": parts})
+            elif m["role"] == "model":
+                history_for_api.append({"role": "model", "parts": [m["content"]]})
+
+        # 이번 턴 메시지 구성
+        current_parts = [prompt]
+        if uploaded_file and not any("image" in m for m in st.session_state.messages[-1:]): # 방금 올린거면
+             current_parts.append(Image.open(uploaded_file))
+
+        chat = model.start_chat(history=history_for_api[:-1]) # 마지막은 send_message로 보냄
+        response = chat.send_message(current_parts)
+
+        # 3. 함수 호출 처리 루프
         while response.parts and response.parts[0].function_call:
             fc = response.parts[0].function_call
             fname = fc.name
             fargs = dict(fc.args)
             
-            # 함수 실행 및 Toast 출력
-            if fname in tools_map:
-                tool_result = tools_map[fname](**fargs)
-                
-                # 결과값을 다시 모델에게 던져줌 (그래야 모델이 "아, 기록됐구나" 하고 다음 말을 함)
-                response = chat.send_message(
-                    genai.protos.Content(
-                        parts=[genai.protos.Part(
-                            function_response=genai.protos.FunctionResponse(
-                                name=fname,
-                                response=tool_result
-                            )
-                        )]
-                    )
+            tool_func = globals().get(fname)
+            tool_result = tool_func(**fargs) if tool_func else "Error"
+            
+            # 결과 반환 및 AI의 후속 대화 생성
+            response = chat.send_message(
+                genai.protos.Content(
+                    parts=[genai.protos.Part(
+                        function_response=genai.protos.FunctionResponse(name=fname, response={"result": tool_result})
+                    )]
                 )
-            else:
-                break # 모르는 함수면 중단
+            )
 
-        # 4. 최종 텍스트 응답 표시
-        final_response_text = response.text
-        st.chat_message("assistant").markdown(final_response_text)
-        st.session_state.messages.append({"role": "model", "content": final_response_text})
+        # 4. 최종 응답 출력
+        st.chat_message("assistant").markdown(response.text)
+        st.session_state.messages.append({"role": "model", "content": response.text})
+        
+        # 파일 업로더 리셋을 위한 실험적 꼼수 (선택사항)
+        if uploaded_file: st.rerun() 
 
     except Exception as e:
-        st.error(f"오류 발생: {e}")
+        st.error(f"오류: {e}")
