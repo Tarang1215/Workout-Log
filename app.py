@@ -240,7 +240,7 @@ SYSTEM_PROMPT = """
 3. **톤앤매너**: 전문적이지만 부드럽고 위트 있게.
 """
 
-model = genai.GenerativeModel("gemini-3-flash-preview", tools=tools, system_instruction=SYSTEM_PROMPT)
+model = genai.GenerativeModel("gemini-2.5-flash", tools=tools, system_instruction=SYSTEM_PROMPT)
 
 # ==========================================
 # 4. Streamlit UI (사이드바 & 메인)
@@ -335,4 +335,5 @@ if prompt := st.chat_input("Waiting for your chat..."):
 
     except Exception as e:
         st.error(f"오류: {e}")
+
 
